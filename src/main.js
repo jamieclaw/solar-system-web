@@ -6,7 +6,7 @@ import {
   SUN_VISUAL_R, planetVisualRadius, orbitalRadius,
   moonOrbitRadius, moonVisualRadius,
 } from './data.js';
-import { makeSunTexture, makePlanetTexture, makeRingTexture, makeMoonTexture } from './textures.js';
+import { makeSunTexture, makePlanetTexture, makeRingTexture, makeMoonTexture, loadAllRealTextures, loadingManager } from './textures.js';
 
 // === J2000 epoch reference: Jan 1 2000 12:00 UTC
 const J2000_MS = Date.UTC(2000, 0, 1, 12, 0, 0);
@@ -65,6 +65,11 @@ sunMesh.add(glow);
 
 // === Build planets
 const planetObjects = []; // { data, pivot, mesh, orbitLine, orbitR }
+// Forward-declared holders for Earth's cloud + atmosphere, populated when
+// real textures finish loading. Declared here so updateBodies() (defined
+// further down) can reference them at module scope without TDZ.
+let earthClouds = null;
+let earthAtmosphere = null;
 
 for (const p of PLANETS) {
   const orbitR = orbitalRadius(p);
@@ -590,6 +595,10 @@ function updateBodies() {
     const rotAngle = (hoursSinceJ2000 / po.data.rotHours) * Math.PI * 2;
     // apply rotation around the body's local axis (already tilted on z)
     po.mesh.rotation.y = rotAngle;
+    // Earth clouds drift ~10% faster than the surface (real prevailing winds)
+    if (po.data.name === 'Earth' && earthClouds) {
+      earthClouds.rotation.y = rotAngle * 1.1;
+    }
   }
 
   // Moon: orbit Earth (centered on Earth pivot frame)
@@ -696,6 +705,214 @@ function animate() {
 
 // initial body update so first frame is correct
 updateBodies();
-// hide loading
-document.getElementById('loading').classList.add('hidden');
+
+// === Real texture loading (async, fades in) =================================
+// (earthClouds/earthAtmosphere are declared at module scope above so
+// updateBodies can read them safely before the IIFE finishes.)
+
+// Wire up loading manager → progress bar
+const loadingEl = document.getElementById('loading');
+const progressBarEl = document.getElementById('loading-bar');
+loadingManager.onProgress = (_url, loaded, total) => {
+  if (progressBarEl) {
+    progressBarEl.style.width = `${(loaded / total * 100).toFixed(1)}%`;
+  }
+};
+loadingManager.onLoad = () => {
+  loadingEl.classList.add('hidden');
+};
+loadingManager.onError = (url) => {
+  console.warn('Texture load failed:', url);
+};
+
+// Bump scale per body — same diffuse map serves as crude heightmap for rocky
+// bodies. Earth/gas giants get bumpScale=0 to skip.
+const BUMP_SCALES = {
+  Mercury: 0.06,
+  Venus: 0.0,    // venus is just clouds, no real terrain visible
+  Earth: 0.0,    // 70% ocean, would look weird
+  Mars: 0.05,
+  Moon: 0.08,
+  Jupiter: 0.0,
+  Saturn: 0.0,
+  Uranus: 0.0,
+  Neptune: 0.0,
+};
+
+(async () => {
+  const tex = await loadAllRealTextures();
+
+  // --- Sun ---
+  if (tex.sunMap) {
+    sunMat.map = tex.sunMap;
+    sunMat.needsUpdate = true;
+  }
+
+  // Map planet name → texture key in the loaded `tex` object.
+  const PLANET_MAP_KEYS = {
+    Mercury: 'mercuryMap',
+    Venus:   'venusMap',
+    Earth:   'earthDayMap',
+    Mars:    'marsMap',
+    Jupiter: 'jupiterMap',
+    Saturn:  'saturnMap',
+    Uranus:  'uranusMap',
+    Neptune: 'neptuneMap',
+  };
+
+  // --- Planets ---
+  for (const entry of planetObjects) {
+    const name = entry.data.name;
+    const realMap = tex[PLANET_MAP_KEYS[name]];
+    if (!realMap) continue;
+    entry.mesh.material.map = realMap;
+    const bumpScale = BUMP_SCALES[name] ?? 0;
+    if (bumpScale > 0) {
+      // Reuse diffuse as bump (height-correlated luminance) — saves 2x bandwidth
+      // versus shipping a separate heightmap, gives 80% of the visual depth.
+      entry.mesh.material.bumpMap = realMap;
+      entry.mesh.material.bumpScale = bumpScale;
+    }
+    // Earth gets night-side emissive trick + roughness from specular map
+    if (name === 'Earth') {
+      if (tex.earthNightMap) {
+        entry.mesh.material.emissiveMap = tex.earthNightMap;
+        entry.mesh.material.emissive = new THREE.Color(0xffaa55);
+        entry.mesh.material.emissiveIntensity = 1.2;
+      }
+      if (tex.earthSpecMap) {
+        // Specular map is land=black, ocean=white. Invert for roughnessMap
+        // (we want oceans = low roughness = shiny). MeshStandardMaterial uses
+        // roughnessMap.g channel. We pass the spec map directly and tune
+        // roughness so oceans still shine.
+        entry.mesh.material.roughnessMap = tex.earthSpecMap;
+        entry.mesh.material.roughness = 0.9;
+        entry.mesh.material.metalness = 0.05;
+      }
+
+      // Custom shader hook: only show emissive on the night side (where the
+      // surface is in shadow relative to the sun at world origin).
+      // We hook into <begin_vertex> (always present) and compute world-space
+      // position + normal ourselves to avoid depending on conditional chunks
+      // like <worldpos_vertex> (which is gated by USE_ENVMAP etc).
+      entry.mesh.material.onBeforeCompile = (shader) => {
+        shader.vertexShader = shader.vertexShader.replace(
+          '#include <common>',
+          `#include <common>
+          varying vec3 vWorldPos_earth;
+          varying vec3 vWorldNormal_earth;`
+        );
+        shader.vertexShader = shader.vertexShader.replace(
+          '#include <begin_vertex>',
+          `#include <begin_vertex>
+          vec4 wp_earth = modelMatrix * vec4(position, 1.0);
+          vWorldPos_earth = wp_earth.xyz;
+          vWorldNormal_earth = normalize(mat3(modelMatrix) * normal);`
+        );
+        shader.fragmentShader = shader.fragmentShader.replace(
+          '#include <common>',
+          `#include <common>
+          varying vec3 vWorldPos_earth;
+          varying vec3 vWorldNormal_earth;`
+        );
+        shader.fragmentShader = shader.fragmentShader.replace(
+          '#include <emissivemap_fragment>',
+          `
+          #ifdef USE_EMISSIVEMAP
+            vec4 emissiveColor = texture2D( emissiveMap, vEmissiveMapUv );
+            // Sun is at world origin; direction from fragment to sun is -vWorldPos.
+            vec3 toSun_earth = normalize(-vWorldPos_earth);
+            float sunDot_earth = dot(vWorldNormal_earth, toSun_earth);
+            // night side when sunDot < 0; soft transition over terminator
+            float nightFactor_earth = smoothstep(0.05, -0.15, sunDot_earth);
+            totalEmissiveRadiance *= emissiveColor.rgb * nightFactor_earth;
+          #endif
+          `
+        );
+      };
+
+      // Earth cloud layer (slightly larger sphere, alpha-blended, slow rotation)
+      if (tex.earthCloudsMap) {
+        const cloudGeom = new THREE.SphereGeometry(entry.visualR * 1.012, 48, 48);
+        const cloudMat = new THREE.MeshStandardMaterial({
+          map: tex.earthCloudsMap,
+          alphaMap: tex.earthCloudsMap,
+          transparent: true,
+          opacity: 0.85,
+          roughness: 1.0,
+          metalness: 0.0,
+          depthWrite: false,
+        });
+        earthClouds = new THREE.Mesh(cloudGeom, cloudMat);
+        // Inherit Earth's tilt
+        earthClouds.rotation.z = THREE.MathUtils.degToRad(entry.data.tilt);
+        entry.mesh.add(earthClouds);
+      }
+
+      // Atmosphere shell (Fresnel rim glow)
+      const atmoGeom = new THREE.SphereGeometry(entry.visualR * 1.05, 48, 48);
+      const atmoMat = new THREE.ShaderMaterial({
+        side: THREE.BackSide,
+        transparent: true,
+        depthWrite: false,
+        uniforms: {
+          glowColor: { value: new THREE.Color(0x4a90e2) },
+          power: { value: 2.5 },
+          intensity: { value: 0.9 },
+        },
+        vertexShader: `
+          varying vec3 vNormal;
+          varying vec3 vWorldPos;
+          void main() {
+            vNormal = normalize(normalMatrix * normal);
+            vec4 wp = modelMatrix * vec4(position, 1.0);
+            vWorldPos = wp.xyz;
+            gl_Position = projectionMatrix * viewMatrix * wp;
+          }
+        `,
+        fragmentShader: `
+          uniform vec3 glowColor;
+          uniform float power;
+          uniform float intensity;
+          varying vec3 vNormal;
+          varying vec3 vWorldPos;
+          void main() {
+            // Fresnel: glow strongest at grazing angles
+            vec3 viewDir = normalize(cameraPosition - vWorldPos);
+            float fres = pow(1.0 - max(dot(vNormal, viewDir), 0.0), power);
+            // Day-side bias: only glow where sun (origin) lights this fragment
+            vec3 toSun = normalize(-vWorldPos);
+            float lit = max(dot(normalize(vNormal), toSun), 0.0);
+            gl_FragColor = vec4(glowColor * fres * intensity * (0.4 + 0.6 * lit), fres);
+          }
+        `,
+      });
+      earthAtmosphere = new THREE.Mesh(atmoGeom, atmoMat);
+      earthAtmosphere.rotation.z = THREE.MathUtils.degToRad(entry.data.tilt);
+      entry.mesh.add(earthAtmosphere);
+    }
+    entry.mesh.material.needsUpdate = true;
+
+    // Saturn ring upgrade
+    if (name === 'Saturn' && entry.ring && tex.saturnRingMap) {
+      // Real ring map is RGBA where alpha encodes density gaps (Cassini etc).
+      tex.saturnRingMap.wrapS = THREE.ClampToEdgeWrapping;
+      tex.saturnRingMap.wrapT = THREE.ClampToEdgeWrapping;
+      entry.ring.material.map = tex.saturnRingMap;
+      entry.ring.material.alphaMap = tex.saturnRingMap;
+      entry.ring.material.transparent = true;
+      entry.ring.material.opacity = 1.0;
+      entry.ring.material.needsUpdate = true;
+    }
+  }
+
+  // --- Moon ---
+  if (tex.moonMap) {
+    moonMesh.material.map = tex.moonMap;
+    moonMesh.material.bumpMap = tex.moonMap;
+    moonMesh.material.bumpScale = BUMP_SCALES.Moon;
+    moonMesh.material.needsUpdate = true;
+  }
+})();
+
 animate();
