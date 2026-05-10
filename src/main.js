@@ -214,6 +214,272 @@ function makeStardust(count, range) {
 const stardust = makeStardust(2500, 800);
 scene.add(stardust);
 
+// === Asteroid Belt (Mars–Jupiter, 2.2–3.3 AU)
+// Hybrid: ~250 small mesh chunks (3D, rotate, hover-pickable) + 1800 particles for dust feel.
+// Uses same auReal^0.6 mapping as planets: 2.2 AU → ~47, 3.3 AU → ~62 scene units.
+const ASTEROID_INNER_AU = 2.2;
+const ASTEROID_OUTER_AU = 3.3;
+const ASTEROID_INNER_R = 30 * Math.pow(ASTEROID_INNER_AU, 0.6);
+const ASTEROID_OUTER_R = 30 * Math.pow(ASTEROID_OUTER_AU, 0.6);
+
+function makeAsteroidBelt() {
+  const group = new THREE.Group();
+
+  // Mesh chunks: shared geometry instanced via individual meshes (small N, fine).
+  // Use a single rough geometry tweaked per-instance via scale.
+  const rockGeom = new THREE.IcosahedronGeometry(0.35, 0);
+  // perturb vertices once for non-spherical look
+  const pos = rockGeom.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+    const j = (Math.sin(i * 13.13) + 1) * 0.5; // deterministic 0-1
+    pos.setXYZ(i, x * (0.7 + j * 0.5), y * (0.7 + j * 0.5), z * (0.7 + j * 0.5));
+  }
+  rockGeom.computeVertexNormals();
+  const rockMat = new THREE.MeshStandardMaterial({ color: 0x7a6a55, roughness: 1.0, metalness: 0.0 });
+
+  const N_MESHES = 250;
+  // store animation data per chunk: { angle0, radius, period, mesh, spinAxis, spinSpeed }
+  const chunks = [];
+  for (let i = 0; i < N_MESHES; i++) {
+    const r = ASTEROID_INNER_R + Math.random() * (ASTEROID_OUTER_R - ASTEROID_INNER_R);
+    const angle0 = Math.random() * Math.PI * 2;
+    const yJitter = (Math.random() - 0.5) * 1.6; // slight inclination
+    const scale = 0.4 + Math.random() * 1.2;
+    const m = new THREE.Mesh(rockGeom, rockMat);
+    m.scale.setScalar(scale);
+    m.userData = { name: 'Asteroid', body: { radiusKm: Math.round(scale * 50) + Math.floor(Math.random() * 100) } };
+    chunks.push({
+      mesh: m,
+      angle0,
+      radius: r,
+      yJitter,
+      // orbital period ~ Kepler: T ∝ r^1.5; reuse Earth=365 at r(1AU)=30 → period(days) = 365 * (au)^1.5
+      // we have r, derive au back: au = (r/30)^(1/0.6)
+      periodDays: 365.256 * Math.pow(Math.pow(r / 30, 1 / 0.6), 1.5),
+      spinAxis: new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize(),
+      spinSpeed: (Math.random() * 2 - 1) * 0.5, // rad/sec at sim time? we'll scale per frame
+    });
+    group.add(m);
+  }
+
+  // Particle dust: 1800 points scattered in the same ring, with own slow orbit.
+  const N_DUST = 1800;
+  const dustGeom = new THREE.BufferGeometry();
+  const dustPos = new Float32Array(N_DUST * 3);
+  const dustData = new Float32Array(N_DUST * 3); // [angle0, radius, yJitter]
+  for (let i = 0; i < N_DUST; i++) {
+    const r = ASTEROID_INNER_R + Math.random() * (ASTEROID_OUTER_R - ASTEROID_INNER_R);
+    const a = Math.random() * Math.PI * 2;
+    const y = (Math.random() - 0.5) * 2.0;
+    dustData[i * 3] = a;
+    dustData[i * 3 + 1] = r;
+    dustData[i * 3 + 2] = y;
+    dustPos[i * 3]     = Math.cos(a) * r;
+    dustPos[i * 3 + 1] = y;
+    dustPos[i * 3 + 2] = Math.sin(a) * r;
+  }
+  dustGeom.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+  const dustMat = new THREE.PointsMaterial({
+    color: 0x9a8870, size: 0.45, sizeAttenuation: true,
+    transparent: true, opacity: 0.65, depthWrite: false,
+  });
+  const dust = new THREE.Points(dustGeom, dustMat);
+  group.add(dust);
+
+  return { group, chunks, dust, dustData };
+}
+const asteroidBelt = makeAsteroidBelt();
+scene.add(asteroidBelt.group);
+
+// === Kuiper Belt (beyond Neptune, ~30–50 AU)
+// Pure particles — too distant for individual meshes to matter visually.
+const KUIPER_INNER_AU = 30;
+const KUIPER_OUTER_AU = 50;
+const KUIPER_INNER_R = 30 * Math.pow(KUIPER_INNER_AU, 0.6);
+const KUIPER_OUTER_R = 30 * Math.pow(KUIPER_OUTER_AU, 0.6);
+
+function makeKuiperBelt() {
+  const N = 5000;
+  const geom = new THREE.BufferGeometry();
+  const pos = new Float32Array(N * 3);
+  const data = new Float32Array(N * 3); // [angle0, radius, yJitter]
+  const colors = new Float32Array(N * 3);
+  for (let i = 0; i < N; i++) {
+    const r = KUIPER_INNER_R + Math.random() * (KUIPER_OUTER_R - KUIPER_INNER_R);
+    const a = Math.random() * Math.PI * 2;
+    // Kuiper belt has more vertical scatter than asteroid belt
+    const y = (Math.random() - 0.5) * 8.0;
+    data[i * 3] = a;
+    data[i * 3 + 1] = r;
+    data[i * 3 + 2] = y;
+    pos[i * 3]     = Math.cos(a) * r;
+    pos[i * 3 + 1] = y;
+    pos[i * 3 + 2] = Math.sin(a) * r;
+    // icy bluish-white tint, varying brightness
+    const b = 0.5 + Math.random() * 0.5;
+    colors[i * 3]     = b * 0.85;
+    colors[i * 3 + 1] = b * 0.92;
+    colors[i * 3 + 2] = b * 1.0;
+  }
+  geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  const mat = new THREE.PointsMaterial({
+    size: 0.6, sizeAttenuation: true, vertexColors: true,
+    transparent: true, opacity: 0.7, depthWrite: false,
+  });
+  const points = new THREE.Points(geom, mat);
+  return { points, data, count: N };
+}
+const kuiperBelt = makeKuiperBelt();
+scene.add(kuiperBelt.points);
+
+// === Meteor streaks (random shooting stars in the background)
+// Each meteor: a fading line/trail traveling across distant space.
+// Avg interval 5-8s, lifetime ~1-1.5s, spawned at random direction far from origin.
+const METEOR_POOL_SIZE = 6;
+const METEOR_TRAIL_SEGMENTS = 16;
+
+function makeMeteor() {
+  const positions = new Float32Array(METEOR_TRAIL_SEGMENTS * 3);
+  const colors = new Float32Array(METEOR_TRAIL_SEGMENTS * 3);
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  const mat = new THREE.LineBasicMaterial({
+    vertexColors: true, transparent: true, opacity: 0.9,
+    blending: THREE.AdditiveBlending, depthWrite: false,
+  });
+  const line = new THREE.Line(geom, mat);
+  line.visible = false;
+  return {
+    line,
+    positions,
+    colors,
+    active: false,
+    age: 0,
+    lifetime: 1.0,
+    start: new THREE.Vector3(),
+    velocity: new THREE.Vector3(),
+  };
+}
+const meteors = [];
+for (let i = 0; i < METEOR_POOL_SIZE; i++) {
+  const m = makeMeteor();
+  meteors.push(m);
+  scene.add(m.line);
+}
+let nextMeteorAt = performance.now() + 2000 + Math.random() * 4000;
+
+function spawnMeteor() {
+  const m = meteors.find((x) => !x.active);
+  if (!m) return;
+  // spawn somewhere in a sphere shell around origin (mid-distance, between solar system & starfield)
+  const radius = 400 + Math.random() * 400;
+  const theta = Math.random() * Math.PI * 2;
+  const phi = Math.acos(2 * Math.random() - 1);
+  m.start.set(
+    radius * Math.sin(phi) * Math.cos(theta),
+    radius * Math.sin(phi) * Math.sin(theta) * 0.6, // squashed vertically
+    radius * Math.cos(phi)
+  );
+  // velocity: random direction, magnitude ~150-300 units/sec
+  const speed = 150 + Math.random() * 200;
+  m.velocity.set(
+    (Math.random() - 0.5),
+    (Math.random() - 0.5) * 0.3,
+    (Math.random() - 0.5)
+  ).normalize().multiplyScalar(speed);
+  m.lifetime = 0.8 + Math.random() * 0.7;
+  m.age = 0;
+  m.active = true;
+  m.line.visible = true;
+  // pick a tint
+  const warm = Math.random() < 0.5;
+  m.tintR = warm ? 1.0 : 0.85;
+  m.tintG = warm ? 0.85 : 0.95;
+  m.tintB = warm ? 0.6  : 1.0;
+}
+
+function updateMeteors(dtRealSec, nowMs) {
+  // spawn schedule
+  if (nowMs >= nextMeteorAt) {
+    spawnMeteor();
+    nextMeteorAt = nowMs + 2000 + Math.random() * 6000; // 2-8s next
+  }
+  for (const m of meteors) {
+    if (!m.active) continue;
+    m.age += dtRealSec;
+    if (m.age >= m.lifetime) {
+      m.active = false;
+      m.line.visible = false;
+      continue;
+    }
+    // Compute trail: head is current position, tail trails behind along -velocity
+    const headT = m.age;
+    const head = new THREE.Vector3().copy(m.start).addScaledVector(m.velocity, headT);
+    const tailLength = 0.25; // seconds of travel behind head
+    const fadeFactor = 1 - (m.age / m.lifetime); // 1 → 0 over lifetime
+    for (let i = 0; i < METEOR_TRAIL_SEGMENTS; i++) {
+      const u = i / (METEOR_TRAIL_SEGMENTS - 1); // 0=tail, 1=head
+      const tBack = (1 - u) * tailLength;
+      const p = new THREE.Vector3().copy(head).addScaledVector(m.velocity, -tBack);
+      m.positions[i * 3]     = p.x;
+      m.positions[i * 3 + 1] = p.y;
+      m.positions[i * 3 + 2] = p.z;
+      const a = u * fadeFactor; // bright at head, faded at tail
+      m.colors[i * 3]     = m.tintR * a;
+      m.colors[i * 3 + 1] = m.tintG * a;
+      m.colors[i * 3 + 2] = m.tintB * a;
+    }
+    m.line.geometry.attributes.position.needsUpdate = true;
+    m.line.geometry.attributes.color.needsUpdate = true;
+  }
+}
+
+// === Update belts each frame: rotate based on simTimeMs (Keplerian period)
+function updateBelts(daysSinceJ2000, dtRealSec) {
+  // Asteroid mesh chunks
+  for (const c of asteroidBelt.chunks) {
+    const angle = c.angle0 + (daysSinceJ2000 / c.periodDays) * Math.PI * 2;
+    c.mesh.position.set(Math.cos(angle) * c.radius, c.yJitter, Math.sin(angle) * c.radius);
+    // self-spin (cosmetic, frame-rate based, not sim-time based to avoid going dizzy at high time-scale)
+    c.mesh.rotateOnAxis(c.spinAxis, c.spinSpeed * dtRealSec);
+  }
+  // Asteroid dust particles
+  const dPos = asteroidBelt.dust.geometry.attributes.position.array;
+  const dData = asteroidBelt.dustData;
+  for (let i = 0; i < dData.length / 3; i++) {
+    const r = dData[i * 3 + 1];
+    const a0 = dData[i * 3];
+    const y = dData[i * 3 + 2];
+    // approx Kepler period for this radius
+    const au = Math.pow(r / 30, 1 / 0.6);
+    const period = 365.256 * Math.pow(au, 1.5);
+    const a = a0 + (daysSinceJ2000 / period) * Math.PI * 2;
+    dPos[i * 3]     = Math.cos(a) * r;
+    dPos[i * 3 + 1] = y;
+    dPos[i * 3 + 2] = Math.sin(a) * r;
+  }
+  asteroidBelt.dust.geometry.attributes.position.needsUpdate = true;
+
+  // Kuiper belt particles (very slow — periods 165yr-350yr)
+  const kPos = kuiperBelt.points.geometry.attributes.position.array;
+  const kData = kuiperBelt.data;
+  for (let i = 0; i < kuiperBelt.count; i++) {
+    const r = kData[i * 3 + 1];
+    const a0 = kData[i * 3];
+    const y = kData[i * 3 + 2];
+    const au = Math.pow(r / 30, 1 / 0.6);
+    const period = 365.256 * Math.pow(au, 1.5);
+    const a = a0 + (daysSinceJ2000 / period) * Math.PI * 2;
+    kPos[i * 3]     = Math.cos(a) * r;
+    kPos[i * 3 + 1] = y;
+    kPos[i * 3 + 2] = Math.sin(a) * r;
+  }
+  kuiperBelt.points.geometry.attributes.position.needsUpdate = true;
+}
+
 // === Simulation state
 const simState = {
   // current simulated date as ms since epoch
@@ -337,7 +603,12 @@ const mouse = new THREE.Vector2();
 const tooltipEl = document.getElementById('tooltip');
 let pickables = [];
 function rebuildPickables() {
-  pickables = [sunMesh, moonMesh, ...planetObjects.map((p) => p.mesh)];
+  pickables = [
+    sunMesh,
+    moonMesh,
+    ...planetObjects.map((p) => p.mesh),
+    ...asteroidBelt.chunks.map((c) => c.mesh),
+  ];
 }
 rebuildPickables();
 
@@ -399,6 +670,13 @@ function animate() {
   }
 
   updateBodies();
+
+  // Belts (asteroid + Kuiper) orbit using same simTime
+  const daysSinceJ2000Anim = (simState.simTimeMs - J2000_MS) / MS_PER_DAY;
+  updateBelts(daysSinceJ2000Anim, dtRealSec);
+
+  // Meteors (real-time, not sim-time)
+  updateMeteors(dtRealSec, now);
 
   // stardust slow rotation
   stardust.rotation.y += dtRealSec * 0.005;
