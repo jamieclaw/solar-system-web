@@ -374,8 +374,10 @@ let nextMeteorAt = performance.now() + 2000 + Math.random() * 4000;
 function spawnMeteor() {
   const m = meteors.find((x) => !x.active);
   if (!m) return;
-  // spawn somewhere in a sphere shell around origin (mid-distance, between solar system & starfield)
-  const radius = 400 + Math.random() * 400;
+  // Spawn closer to camera so they're visually obvious.
+  // Camera defaults to z~120, system extends to ~315 (Kuiper outer); we want
+  // meteors visible against starfield but close enough to see length.
+  const radius = 180 + Math.random() * 220;  // 180-400
   const theta = Math.random() * Math.PI * 2;
   const phi = Math.acos(2 * Math.random() - 1);
   m.start.set(
@@ -383,14 +385,15 @@ function spawnMeteor() {
     radius * Math.sin(phi) * Math.sin(theta) * 0.6, // squashed vertically
     radius * Math.cos(phi)
   );
-  // velocity: random direction, magnitude ~150-300 units/sec
-  const speed = 150 + Math.random() * 200;
+  // velocity: random direction, magnitude ~80-160 units/sec (slower than before
+  // since they're closer; same visual angular speed)
+  const speed = 80 + Math.random() * 80;
   m.velocity.set(
     (Math.random() - 0.5),
     (Math.random() - 0.5) * 0.3,
     (Math.random() - 0.5)
   ).normalize().multiplyScalar(speed);
-  m.lifetime = 0.8 + Math.random() * 0.7;
+  m.lifetime = 1.0 + Math.random() * 0.8;
   m.age = 0;
   m.active = true;
   m.line.visible = true;
@@ -405,7 +408,7 @@ function updateMeteors(dtRealSec, nowMs) {
   // spawn schedule
   if (nowMs >= nextMeteorAt) {
     spawnMeteor();
-    nextMeteorAt = nowMs + 2000 + Math.random() * 6000; // 2-8s next
+    nextMeteorAt = nowMs + 1500 + Math.random() * 4500; // 1.5-6s next
   }
   for (const m of meteors) {
     if (!m.active) continue;
@@ -418,8 +421,10 @@ function updateMeteors(dtRealSec, nowMs) {
     // Compute trail: head is current position, tail trails behind along -velocity
     const headT = m.age;
     const head = new THREE.Vector3().copy(m.start).addScaledVector(m.velocity, headT);
-    const tailLength = 0.25; // seconds of travel behind head
+    const tailLength = 0.6; // seconds of travel behind head — longer = more visible streak
     const fadeFactor = 1 - (m.age / m.lifetime); // 1 → 0 over lifetime
+    // Brightness boost: meteor heads should be punchy on first sight, then fade.
+    const headBoost = Math.min(1.0, m.age * 6); // ramp in over 0.16s
     for (let i = 0; i < METEOR_TRAIL_SEGMENTS; i++) {
       const u = i / (METEOR_TRAIL_SEGMENTS - 1); // 0=tail, 1=head
       const tBack = (1 - u) * tailLength;
@@ -427,7 +432,8 @@ function updateMeteors(dtRealSec, nowMs) {
       m.positions[i * 3]     = p.x;
       m.positions[i * 3 + 1] = p.y;
       m.positions[i * 3 + 2] = p.z;
-      const a = u * fadeFactor; // bright at head, faded at tail
+      // Sharper falloff: u^2 keeps the head bright while making the tail fade fast.
+      const a = u * u * fadeFactor * headBoost * 1.6;
       m.colors[i * 3]     = m.tintR * a;
       m.colors[i * 3 + 1] = m.tintG * a;
       m.colors[i * 3 + 2] = m.tintB * a;
