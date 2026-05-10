@@ -698,8 +698,4 @@ function animate() {
 updateBodies();
 // hide loading
 document.getElementById('loading').classList.add('hidden');
-
-// Debug hook — exposes meteor state for live inspection
-window.__solarDebug = { meteors, scene, camera, renderer, simState };
-
 animate();
