@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Solar System</title>
+    <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+    <style>
+      html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #000; color: #ddd; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+      #app { position: fixed; inset: 0; }
+      #tooltip {
+        position: fixed; pointer-events: none; padding: 6px 10px;
+        background: rgba(10, 12, 20, 0.85); border: 1px solid rgba(255,255,255,0.15);
+        border-radius: 6px; font-size: 12px; color: #eee; backdrop-filter: blur(8px);
+        opacity: 0; transition: opacity 120ms; transform: translate(12px, 12px);
+        z-index: 100; white-space: nowrap;
+      }
+      #tooltip.show { opacity: 1; }
+      #tooltip .name { font-weight: 600; color: #fff; }
+      #tooltip .row { color: #aaa; font-size: 11px; }
+      #loading {
+        position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+        background: #000; color: #888; font-size: 14px; z-index: 200; transition: opacity 400ms;
+      }
+      #loading.hidden { opacity: 0; pointer-events: none; }
+      #credit {
+        position: fixed; bottom: 8px; left: 12px; font-size: 11px; color: #555; z-index: 50;
+      }
+      #credit a { color: #888; text-decoration: none; }
+      #credit a:hover { color: #ccc; }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="tooltip"></div>
+    <div id="loading">Loading textures…</div>
+    <div id="credit">Solar System · <a href="https://github.com/jamieclaw/solar-system-web" target="_blank" rel="noopener">source</a></div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
